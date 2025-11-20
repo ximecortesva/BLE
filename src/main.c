@@ -1,14 +1,5 @@
-/* ***************************************************************
- * Código combinado para Microbit V2 con Zephyr RTOS
- *
- * Funcionalidad:
- * 1. Conexión BLE con el nombre "microbio" (definido en prj.conf).
- * 2. Característica 1 (Notify): Envía el conteo de los botones A y B
- * cada vez que se presionan.
- * 3. Característica 2 (Read): Permite a la app leer la temperatura
- * del sensor interno bajo demanda.
- *
- * *************************************************************** */
+/* Ximena Cortés, Samantha Bravo y Dana Paola Valiente
+*/
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
