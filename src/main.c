@@ -1,14 +1,8 @@
-/* ***************************************************************
- * Código combinado para Microbit V2 con Zephyr RTOS
- *
- * Funcionalidad:
- * 1. Conexión BLE con el nombre "microbio" (definido en prj.conf).
- * 2. Característica 1 (Notify): Envía el conteo de los botones A y B
- * cada vez que se presionan.
- * 3. Característica 2 (Read): Permite a la app leer la temperatura
- * del sensor interno bajo demanda.
- *
- * *************************************************************** */
+/* Ximena Cortés, Samantha Bravo y Dana Paola Valiente
+El código configura dos botones y un sensor de temperatura, y expone ambos mediante Bluetooth Low Energy. 
+Cada vez que se presionan los botones, se envía una notificación BLE con sus contadores. La temperatura se 
+lee bajo demanda cuando una app solicita la característica. Todo el manejo se realiza mediante interrupciones 
+y callbacks de BLE */
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -21,23 +15,25 @@
 #include <zephyr/bluetooth/hci.h>
 #include <stdio.h>
 
+// Registro del módulo de logs
 LOG_MODULE_REGISTER(BLE_Sensores, LOG_LEVEL_INF);
 
-// --- Definiciones de Botones ---
+// Configuración de botones
 #define BUTTON_A_NODE DT_ALIAS(sw0)
 #define BUTTON_B_NODE DT_ALIAS(sw1)
 
 static const struct gpio_dt_spec bA = GPIO_DT_SPEC_GET(BUTTON_A_NODE, gpios);
 static const struct gpio_dt_spec bB = GPIO_DT_SPEC_GET(BUTTON_B_NODE, gpios);
 
+// Callbacks usados por las interrupciones
 static struct gpio_callback button_a_cb;
 static struct gpio_callback button_b_cb;
 
-// --- Definiciones de Sensor de Temperatura ---
+// Sensor de temperatura
 const struct device *temp_dev;
 struct sensor_value temperature;
 
-// --- Definiciones de BLE ---
+// Configuración BLE
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
     // UUID del Servicio Principal (el mismo que tenías)
@@ -56,97 +52,82 @@ static const struct bt_le_adv_param adv_params = {
     .interval_max = BT_GAP_ADV_FAST_INT_MAX_2,
 };
 
-// --- Variables de Características GATT ---
+// Variables compartidas para GATT
 static struct bt_conn *current_conn;
 
-// button_counts[0] = Botón A
-// button_counts[1] = Botón B
+// Contadores de botones -> enviados por notificación
 static uint8_t button_counts[2] = {0, 0};
 
-// temp_value[0] = Parte entera (ej: 25)
-// temp_value[1] = Parte decimal (ej: 34)
+// Temperatura enviada por lectura GATT [entero, decimal]
 static int8_t temp_value[2] = {0, 0};
 
-// --- Prototipos de Funciones ---
+// Prototipos para callbacks y GATT
 static void button_a_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 static void button_b_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 static ssize_t read_temperature_value(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                      void *buf, uint16_t len, uint16_t offset);
 static void button_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 
-// --- Callbacks de BLE GATT ---
-
-/**
- * @brief Callback para la lectura de la característica de temperatura.
- * Se ejecuta CADA VEZ que la app nRF Connect solicita una lectura.
- */
+// Callbacks de lectura GATT
 static ssize_t read_temperature_value(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                      void *buf, uint16_t len, uint16_t offset)
 {
     LOG_INF("Solicitud de lectura de temperatura recibida.");
 
-    // 1. Tomar muestra del sensor
+    // Toma nueva muestra del sensor
     if (sensor_sample_fetch(temp_dev)) {
         LOG_ERR("Fallo al leer el sensor de temperatura");
         // Enviar valores antiguos o cero si falla
     } else {
-        // 2. Obtener el canal
+        // Obtiene el canal de temperatura interna del chip
         sensor_channel_get(temp_dev, SENSOR_CHAN_DIE_TEMP, &temperature);
 
-        // 3. Actualizar el valor que se enviará
+        // Convierte valores a formato entero + decimal
         temp_value[0] = (int8_t)temperature.val1;
         temp_value[1] = (int8_t)(temperature.val2 / 10000); // Tomar solo 2 decimales
         
         LOG_INF("Enviando Temperatura: %d.%02d C", temp_value[0], temp_value[1]);
     }
 
-    // 4. Enviar los datos al teléfono
+    // Respuesta a la lectura GATT
     return bt_gatt_attr_read(conn, attr, buf, len, offset, &temp_value, sizeof(temp_value));
 }
 
-/**
- * @brief Callback para la configuración de notificaciones (CCC).
- * Se ejecuta cuando la app se suscribe o desuscribe.
- */
+// Callback para notificaciones GATT
 static void button_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
     LOG_INF("Notificaciones %s", (value == BT_GATT_CCC_NOTIFY) ? "habilitadas" : "deshabilitadas");
 }
 
-// --- Definición del Servicio GATT ---
-// UUID Servicio: ...123456789abcdef0
-// UUID Char 1 (Botones): ...123456789abcdef1 (Notify)
-// UUID Char 2 (Temp): ...123456789abcdef2 (Read)
-
+// Servicio GATT
 BT_GATT_SERVICE_DEFINE(main_svc,
-    // Servicio Primario
+     // Servicio principal con UUID 128-bit
     BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(
         0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
         0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12)),
 
-    // Característica 1: Contador de Botones (Notify)
+    // Notificación de botones
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(
-        0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, // UUID ...f1
+        0xf1, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
         0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12),
         BT_GATT_CHRC_NOTIFY,
         BT_GATT_PERM_NONE,
         NULL, NULL, &button_counts), // Apunta a nuestro array de conteo
     
-    // Descriptor CCC para habilitar las notificaciones
+    // Descriptor CCC para habilitar notificaciones
     BT_GATT_CCC(button_ccc_cfg_changed,
                 BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 
-    // Característica 2: Valor de Temperatura (Read)
+    // Lectura de temperatura
     BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(
-        0xf2, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, // UUID ...f2
+        0xf2, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
         0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12),
         BT_GATT_CHRC_READ,
         BT_GATT_PERM_READ,
         read_temperature_value, NULL, &temp_value) // Llama al callback al leer
 );
 
-// --- Callbacks de Conexión BLE ---
-
+// Callbacks BLE
 static void connected(struct bt_conn *conn, uint8_t err)
 {
     if (err) {
@@ -160,34 +141,29 @@ static void connected(struct bt_conn *conn, uint8_t err)
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     LOG_INF("Desconectado (razon %u)", reason);
+    // Liberar referencia
     if (current_conn) {
         bt_conn_unref(current_conn);
         current_conn = NULL;
     }
-    // Reiniciar advertising
+    // Reiniciar advertising después de desconectar
     int ret = bt_le_adv_start(&adv_params, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
     if (ret) {
         LOG_ERR("No se pudo reiniciar el advertising (err %d)", ret);
     }
 }
 
+// Registrar callbacks BLE globales
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected,
     .disconnected = disconnected,
 };
 
-// --- ISRs (Interrupciones) de Botones ---
-
-/**
- * @brief Notifica el estado de los botones al cliente BLE.
- */
+// Interrupciones
 static void notify_button_state(void)
 {
-    // Si hay un cliente conectado y suscrito...
+    // Solo si existe un dispositivo conectado
     if (current_conn) {
-        // ...enviar los datos.
-        // OJO: El índice [2] es el atributo de valor de la Característica 1
-        // Attrs: [0]Servicio, [1]Char1(decl), [2]Char1(valor), [3]Char1(CCC), [4]Char2(decl), [5]Char2(valor)
         bt_gatt_notify(current_conn, &main_svc.attrs[2], &button_counts, sizeof(button_counts));
     }
 }
@@ -196,9 +172,9 @@ static void notify_button_state(void)
 static void button_a_pressed(const struct device *dev, struct gpio_callback *cb,
                              uint32_t pins)
 {
-    button_counts[0]++;
+    button_counts[0]++; // Incrementar contador
     LOG_INF("Boton A presionado. Total: %d", button_counts[0]);
-    notify_button_state();
+    notify_button_state(); // Enviar notificación BLE
 }
 
 // ISR para Botón B
@@ -210,15 +186,13 @@ static void button_b_pressed(const struct device *dev, struct gpio_callback *cb,
     notify_button_state();
 }
 
-// --- Programa Principal ---
-
 int main(void)
 {
     int ret;
 
     LOG_INF("...Inicializando app BLE de Botones y Temperatura...");
 
-    // 1. Inicializar Botón A
+    // Configura Botón A
     if (!device_is_ready(bA.port)) {
         LOG_ERR("GPIO del boton A no esta listo");
         return 0;
@@ -230,7 +204,7 @@ int main(void)
     gpio_pin_interrupt_configure_dt(&bA, GPIO_INT_EDGE_TO_ACTIVE);
     LOG_INF("Boton A OK");
 
-    // 2. Inicializar Botón B
+    // Configura Botón B
     if (!device_is_ready(bB.port)) {
         LOG_ERR("GPIO del boton B no esta listo");
         return 0;
@@ -242,7 +216,7 @@ int main(void)
     gpio_pin_interrupt_configure_dt(&bB, GPIO_INT_EDGE_TO_ACTIVE);
     LOG_INF("Boton B OK");
 
-    // 3. Inicializar Sensor de Temperatura
+    // Inicializa sensor de temperatura
     temp_dev = DEVICE_DT_GET_ANY(nordic_nrf_temp);
     if (!device_is_ready(temp_dev)) {
         LOG_ERR("Sensor de temperatura no esta listo");
@@ -250,7 +224,7 @@ int main(void)
     }
     LOG_INF("Sensor de Temperatura OK");
 
-    // 4. Habilitar el BLE
+    // Habilita el BLE
     ret = bt_enable(NULL);
     if (ret) {
         LOG_ERR("No funciono el BLE (err %d)", ret);
@@ -258,7 +232,7 @@ int main(void)
     }
     LOG_INF("Bluetooth OK");
 
-    // 5. Iniciar Advertising
+    // Inicia el advertising
     ret = bt_le_adv_start(&adv_params, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
     if (ret) {
         LOG_ERR("El Advertising no fue posible (err %d)", ret);
@@ -266,6 +240,5 @@ int main(void)
     }
     LOG_INF("Advertising iniciado. Busca a: %s", CONFIG_BT_DEVICE_NAME);
     
-    // El hilo principal puede terminar; las interrupciones y callbacks se encargan
     return 0;
 }
